@@ -1,4 +1,5 @@
-from typing import Dict, List, Optional, Union, Literal
+from typing import Dict, List, Optional, Union, Literal, Any, Callable
+import datasets
 import numpy as np
 from subset2evaluate.reference_info import year2std_refs
 
@@ -79,37 +80,107 @@ def ensure_wmt_exists():
             f.extractall("data/")
         os.remove("data/mt-metrics-eval-v2.tgz")
 
-    
-def load_data_biomqm(
-    split: Literal["dev", "test"]="dev",
-    normalize: bool=False,
+
+def load_data_hf(
+    dataset: Any,
+    loader: Callable = datasets.load_dataset,
+    loader_kwargs: Optional[dict] = None,
+    cache_fname: Optional[str] = None,
+    converter: Optional[Callable] = None,
+    converter_kwargs: Optional[dict] = None,
 ):
-    import json
-    import os
+    """Load a dataset from Hugging Face, with optional caching and conversion.
+    This function loads a dataset using the provided loader function
+    by default `datasets.load_dataset` from the Hugging Face library.
+    It also allows for a custom converter function to be applied to the
+    dataset after loading.
+    It supports caching the loaded and processed dataset to a pickle file to speed up subsequent loads.
+    Args:
+        dataset (Any): The name of the Hugging Face Dataset to load or the first positional
+            argument of the `loader` function.
+            This is typically in the format 'username/dataset_name' or just 'dataset_name'.
+        loader (Callable, optional): A callable function to load the dataset.
+            By default, it uses `datasets.load_dataset` from the Hugging Face library.
+            This function should accept the `dataset` as its first argument.
+            If you want to use a different loader, you can pass it here.
+            Some alternative loaders could be found in:
+            https://huggingface.co/docs/datasets/package_reference/loading_methods
+            https://huggingface.co/docs/datasets/loading
+        loader_kwargs (Optional[dict], optional): Additional keyword arguments to pass
+            directly to the `loader` function. Defaults to None.
+        cache (Optional[str], optional): Path to a pickle file where the loaded
+            and potentially converted dataset will be cached.
+            If a string path is provided, it's used for loading from and saving to the cache.
+            Defaults to None, meaning no caching is performed.
+        converter (Optional[Callable], optional): A callable function that takes
+            the loaded Hugging Face dataset as input and transforms it into a
+            format suitable for further processing by 'subset2eval'.
+            Defaults to None, meaning no conversion is applied.
+        converter_kwargs (Optional[dict], optional): Additional keyword arguments
+            to pass to the `converter` function if one is provided. Defaults to None.
+    Returns:
+        Any: The loaded dataset. If a converter is provided, this will be the
+             result of the converter. Otherwise, it's the raw dataset loaded
+             from Hugging Face.
+    """
+
+    if cache_fname:
+        import contextlib
+        import importlib
+        import os
+        import pickle
+
+        # temporarily change to the root directory, this requires Python 3.11
+        with contextlib.chdir(os.path.dirname(os.path.realpath(__file__)) + "/../"):
+            os.makedirs("data/cache/", exist_ok=True)
+            cache_f = f"data/cache/{cache_fname}.pkl"
+
+            # load cache if exists
+            if os.path.exists(cache_f):
+                with open(cache_f, "rb") as f:
+                    cache = pickle.load(f)
+                    # only load data if they come from the same version
+                    if (
+                        isinstance(cache, dict)
+                        and "version" in cache.keys()
+                        and cache["version"]
+                        == importlib.metadata.version("subset2evaluate")
+                    ):
+                        return cache["data"]
+
+    raw_data = loader(dataset, **(loader_kwargs or {}))
+
+    if converter:
+        data = converter(raw_data, **(converter_kwargs or {}))
+    else:
+        data = raw_data
+
+    if cache_fname:
+        # save cache
+        with open(cache_f, "wb") as f:
+            pickle.dump(
+                {
+                    "version": importlib.metadata.version("subset2evaluate"),
+                    "data": data,
+                },
+                f,
+            )
+
+    return data
+
+
+def biomqm_converter(
+    hf_dataset: datasets.Dataset, normalize: bool = False
+) -> List[Dict[str, Any]]:
+    """Convert a Hugging Face dataset to the format expected by 'subset2eval' for BioMQM."""
     import collections
-    import contextlib
-    assert split in {"dev", "test"}, "split must be either 'dev' or 'test'"
-
-
-    # temporarily change to the root directory, this requires Python 3.11
-    with contextlib.chdir(os.path.dirname(os.path.realpath(__file__)) + "/../"):
-        # ensure BioMQM exists
-        if not os.path.exists(f"data/biomqm/{split}.jsonl"):
-            import requests
-            print(f"Downloading {split} BioMQM data because data/biomqm/{split} does not exist..")
-            os.makedirs("data/biomqm", exist_ok=True)
-            
-            r = requests.get(f"https://huggingface.co/datasets/zouharvi/bio-mqm-dataset/resolve/main/{split}.jsonl?download=true")
-            with open(f"data/biomqm/{split}.jsonl", "wb") as f:
-                f.write(r.content)
-
-        with open(f"data/biomqm/{split}.jsonl", "r") as f:
-            lines = [json.loads(line) for line in f]
 
     grouped = {}
-    for item in lines:
+    for item in hf_dataset:
         src = item["src"]
-        ref = item["ref"][0].strip() if len(item["ref"]) > 0 else None  # for compatibility with WMT loader
+        ref = (
+            item["ref"][0].strip() if len(item["ref"]) > 0 else None
+        )  # for compatibility with WMT loader
         doc = item.get("doc_id", "bio-doc")
         domain = "bio"
         langs = f"{item['lang_src']}-{item['lang_tgt']}"
@@ -184,7 +255,38 @@ def load_data_biomqm(
     return data
 
 
-    
+def load_data_biomqm(
+    split: Literal["validation", "dev", "test"] = "dev",
+    normalize: bool = False,
+    cache_fname: Optional[str] = None,
+):
+    """Load BioMQM dataset from Hugging Face or local files.
+    Args:
+        split (Literal["dev", "test"], optional): The split of the BioMQM dataset to load.
+            Defaults to "dev".
+        normalize (bool, optional): Whether to normalize the costs and scores.
+            Defaults to False.
+    Returns:
+        Dict[str, List[Dict[str, Any]]]: A dictionary with keys as language pairs
+            and values as lists of entries containing source, reference, target,
+            scores, document ID, domain, and cost.
+    """
+    import datasets
+
+    assert split in {"validation", "dev", "test"}, (
+        "split must be either 'validation', 'dev' or 'test'"
+    )
+
+    return load_data_hf(
+        dataset="zouharvi/bio-mqm-dataset",
+        loader=datasets.load_dataset,
+        loader_kwargs={"split": "validation" if split == "dev" else split},
+        converter=biomqm_converter,
+        converter_kwargs={"normalize": normalize},
+        cache_fname=cache_fname,
+    )
+
+
 def load_data_wmt(  # noqa: C901
     year: str = "wmt23",
     langs: str = "en-cs",
