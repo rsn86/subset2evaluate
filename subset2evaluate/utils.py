@@ -470,11 +470,10 @@ def load_data_qe4pe(
 
         # convert to list
         data = collections.defaultdict(list)
-        for i, item in enumerate(grouped.values()):
+        for item in grouped.values():
             # just a very rough estimate
             cost = 0.15 * len(item["src"].split()) + 33.7
             entry = {
-                "i": i,
                 "src": item["src"],
                 "ref": item["ref"],
                 "tgt": item["tgt"],
@@ -484,6 +483,11 @@ def load_data_qe4pe(
                 "cost": cost,
             }
             data[("qe4pe", item["langs"])].append(entry)
+
+        # set a 0 based index for each item of each language pair
+        for data_per_lang in data.values():
+            for i, item in enumerate(data_per_lang):
+                item["i"] = i
 
         # always normalize costs
         if data:
