@@ -81,6 +81,45 @@ def ensure_wmt_exists():
         os.remove("data/mt-metrics-eval-v2.tgz")
 
 
+def mqm_score(severities, weights: Dict[str, int] = None) -> int:
+    """
+    Calculate the MQM score based on the errors.
+
+    Args:
+        errors (list): List of error dictionaries.
+
+    Returns:
+        int: The calculated MQM score.
+    """
+    if weights is None:
+        weights = {
+            "neutral": 0,
+            "minor": -1,
+            "major": -5,
+            "critical": -25,
+        }
+    score = 0
+    for severity in severities:
+        score += weights.get(severity, 0)
+    return score
+
+
+def get_errors_severities(errors: List[Dict[str, Any]], sev_attr_name="severity") -> List[str]:
+    """
+    Extract the severity levels from the errors.
+
+    Args:
+        errors (list): List of error dictionaries.
+        sev_attr_name (str): The attribute name for severity in the error dictionaries. Default is "severity".
+
+    Returns:
+        list: List of severity levels.
+    """
+    if not errors:
+        return []
+    return [err.get(sev_attr_name, "").lower() for err in errors]
+
+
 def load_data_hf(
     dataset: Any,
     loader: Callable = datasets.load_dataset,
@@ -169,92 +208,6 @@ def load_data_hf(
     return data
 
 
-def biomqm_converter(
-    hf_dataset: datasets.Dataset, normalize: bool = False
-) -> List[Dict[str, Any]]:
-    """Convert a Hugging Face dataset to the format expected by 'subset2eval' for BioMQM."""
-    import collections
-
-    grouped = {}
-    for item in hf_dataset:
-        src = item["src"]
-        ref = (
-            item["ref"][0].strip() if len(item["ref"]) > 0 else None
-        )  # for compatibility with WMT loader
-        doc = item.get("doc_id", "bio-doc")
-        domain = "bio"
-        langs = f"{item['lang_src']}-{item['lang_tgt']}"
-
-        model = item["system"]
-        tgt = item["tgt"].strip()
-
-        # compute score
-        score = 0
-        for err in item["errors_tgt"]:
-            severity = err.get("severity", "").lower()
-            if severity == "minor":
-                score -= 1
-            elif severity == "major":
-                score -= 5
-
-        key = (src, ref, doc)
-        if key not in grouped:
-            grouped[key] = {
-                "src": src,
-                "ref": ref,
-                "doc": doc,
-                "domain": domain,
-                "langs": langs,
-                "tgt": {},
-                "scores": {},
-            }
-
-        grouped[key]["tgt"][model] = tgt
-        grouped[key]["scores"][model] = {"human": float(score)}
-
-    # convert to list
-    data = collections.defaultdict(list)
-    for i, item in enumerate(grouped.values()):
-        # calculate word count
-        word_count = len(item["src"].split())
-        cost = 0.15 * word_count + 33.7
-        entry = {
-            "i": i,
-            "src": item["src"],
-            "ref": item["ref"],
-            "tgt": item["tgt"],
-            "scores": item["scores"],
-            "doc": item["doc"],
-            "domain": item["domain"],
-            "cost": cost,
-        }
-        data[("biomqm", item["langs"])].append(entry)
-
-    if normalize:
-        for data_per_lang in data.values():
-            # Normalize cost
-            costs = np.array([x["cost"] for x in data_per_lang])
-            cost_norm = (costs - costs.mean()) / costs.std() + 1
-            cost_norm = (cost_norm - cost_norm.min()) / (1 - cost_norm.min())
-            for i, x in enumerate(data_per_lang):
-                x["cost"] = float(cost_norm[i])
-
-            # Normalize scores to 0–100 if requested
-            all_scores = [
-                score["human"]
-                for item in data_per_lang
-                for score in item["scores"].values()
-            ]
-            smin, smax = min(all_scores), max(all_scores)
-            for item in data_per_lang:
-                for model in item["scores"]:
-                    raw = item["scores"][model]["human"]
-                    scaled = 100 * (raw - smin) / (smax - smin) if smax > smin else 0
-                    item["scores"][model]["human"] = float(scaled)
-
-    return data
-
-
 def load_data_biomqm(
     split: Literal["validation", "dev", "test"] = "dev",
     normalize: bool = False,
@@ -277,6 +230,92 @@ def load_data_biomqm(
         "split must be either 'validation', 'dev' or 'test'"
     )
 
+
+    def biomqm_converter(
+        hf_dataset: datasets.Dataset, normalize: bool = False
+    ) -> List[Dict[str, Any]]:
+        """Convert a Hugging Face dataset to the format expected by 'subset2eval' for BioMQM."""
+        import collections
+
+        grouped = {}
+        for item in hf_dataset:
+            src = item["src"]
+            ref = (
+                item["ref"][0].strip() if len(item["ref"]) > 0 else None
+            )  # for compatibility with WMT loader
+            doc = item.get("doc_id", "bio-doc")
+            domain = "bio"
+            langs = f"{item['lang_src']}-{item['lang_tgt']}"
+
+            model = item["system"]
+            tgt = item["tgt"].strip()
+
+            # compute score
+            score = 0
+            for err in item["errors_tgt"]:
+                severity = err.get("severity", "").lower()
+                if severity == "minor":
+                    score -= 1
+                elif severity == "major":
+                    score -= 5
+
+            key = (src, ref, doc)
+            if key not in grouped:
+                grouped[key] = {
+                    "src": src,
+                    "ref": ref,
+                    "doc": doc,
+                    "domain": domain,
+                    "langs": langs,
+                    "tgt": {},
+                    "scores": {},
+                }
+
+            grouped[key]["tgt"][model] = tgt
+            grouped[key]["scores"][model] = {"human": float(score)}
+
+        # convert to list
+        data = collections.defaultdict(list)
+        for i, item in enumerate(grouped.values()):
+            # calculate word count
+            word_count = len(item["src"].split())
+            cost = 0.15 * word_count + 33.7
+            entry = {
+                "i": i,
+                "src": item["src"],
+                "ref": item["ref"],
+                "tgt": item["tgt"],
+                "scores": item["scores"],
+                "doc": item["doc"],
+                "domain": item["domain"],
+                "cost": cost,
+            }
+            data[("biomqm", item["langs"])].append(entry)
+
+        if normalize:
+            for data_per_lang in data.values():
+                # Normalize cost
+                costs = np.array([x["cost"] for x in data_per_lang])
+                cost_norm = (costs - costs.mean()) / costs.std() + 1
+                cost_norm = (cost_norm - cost_norm.min()) / (1 - cost_norm.min())
+                for i, x in enumerate(data_per_lang):
+                    x["cost"] = float(cost_norm[i])
+
+                # Normalize scores to 0–100 if requested
+                all_scores = [
+                    score["human"]
+                    for item in data_per_lang
+                    for score in item["scores"].values()
+                ]
+                smin, smax = min(all_scores), max(all_scores)
+                for item in data_per_lang:
+                    for model in item["scores"]:
+                        raw = item["scores"][model]["human"]
+                        scaled = 100 * (raw - smin) / (smax - smin) if smax > smin else 0
+                        item["scores"][model]["human"] = float(scaled)
+
+        return data
+
     return load_data_hf(
         dataset="zouharvi/bio-mqm-dataset",
         loader=datasets.load_dataset,
@@ -284,6 +323,212 @@ def load_data_biomqm(
         converter=biomqm_converter,
         converter_kwargs={"normalize": normalize},
         cache_fname=cache_fname,
+    )
+
+
+def load_data_qe4pe(
+    task: Literal["pretask", "main", "posttask"] = "main",
+    normalize: bool = False,
+    cache_fname: str = None,
+    dataset: str = "gsarti/qe4pe",
+    mqm_weights: Dict[str, int] = None,
+    skip_has_issue: bool = False,
+    skip_has_added_critical_error: bool = False,
+    score_attrs: List[str] = None,
+    mqm_attrs: List[str] = None,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Load the QE4PE dataset for the specified task.
+
+    Args:
+        task (str): The task to load data for. Options are 'pretask', 'main', or 'posttask'.
+        dataset (str): The name of the dataset to load. Default is "gsarti/qe4pe".
+
+    Returns:
+        Dataset: The loaded dataset.
+    """
+    assert task in ["pretask", "main", "posttask"], "Task must be one of 'pretask', 'main', or 'posttask'."
+
+    import datasets
+
+    def qe4pe_converter(
+        hf_dataset: datasets.Dataset,
+        normalize: bool = False,
+        mqm_weights: Dict[str, int] = None,
+        skip_has_issue: bool = False,
+        skip_has_added_critical_error: bool = False,
+        score_attrs: List[str] = None,
+        mqm_attrs: List[str] = None,
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Convert the Hugging Face dataset to the required format for subset2eval.
+
+        Args:
+            hf_dataset (Dataset): The Hugging Face dataset to convert.
+            normalize (bool): Whether to normalize the costs and mqm scores.
+            mqm_weights (Dict[str, int]): Weights for MQM error severities.
+            skip_has_issue (bool): Whether to skip entries with issues.
+            skip_has_added_critical_error (bool): Whether to skip entries with added critical errors.
+            score_attrs (List[str]): Attributes to consider for scores. If None, uses all boolean and numeric attributes from the dataset from the 11th column (has_issues) and forward, except those in `mqm_scores`, strings and ids.
+            mqm_attrs (List[str]): Attributes to consider for MQM scores, which are used to compute the MQM score from the errors. If None, uses the default attributes for MQM scores, which are "mt_xcomet_errors", "pe_xcomet_errors", "highlights", "qa_mt_mqm_errors" and "qa_pe_mqm_errors" attributes from the dataset
+
+        Returns:
+            Dict[str, List[Dict[str, Any]]]: The converted dataset.
+        """
+
+        import ast
+        import collections
+        import unicodedata
+
+        attrs_to_ignore = [
+            "unit_id",
+            "wmt_id",
+            "wmt_category",
+            "doc_id",
+            "segment_in_doc_id",
+            "segment_id",
+            "translator_pretask_id",
+            "translator_main_id",
+            "src_lang",
+            "tgt_lang",
+            "highlight_modality",
+            "issue_description",
+            "critical_error_description",
+            "mt_xcomet_errors",
+            "pe_xcomet_errors",
+            "src_text",
+            "mt_text",
+            "mt_text_highlighted",
+            "pe_text",
+            "mt_pe_word_aligned",
+            "mt_pe_char_aligned",
+            "highlights",
+            "qa_mt_annotator_id",
+            "qa_pe_annotator_id",
+            "qa_mt_annotated_text",
+            "qa_pe_annotated_text",
+            "qa_mt_fixed_text",
+            "qa_pe_fixed_text",
+            "qa_mt_mqm_errors",
+            "qa_pe_mqm_errors",
+        ]
+        score_attrs = score_attrs or [
+            col_name for col_name in hf_dataset.column_names if col_name not in attrs_to_ignore
+        ]
+        mqm_attrs = mqm_attrs or (
+            "mt_xcomet_errors",
+            "pe_xcomet_errors",
+            "highlights",
+            "qa_mt_mqm_errors",
+            "qa_pe_mqm_errors",
+        )
+
+        grouped = {}
+        for item in hf_dataset:
+            if skip_has_issue and item.get("has_issue", False):
+                continue
+            if skip_has_added_critical_error and item.get("has_added_critical_error", False):
+                continue
+            src = unicodedata.normalize("NFKC", item["src_text"].strip())
+            ref = unicodedata.normalize("NFKC", item["mt_text"].strip())
+            doc = item['doc_id']
+            seg = item['segment_in_doc_id']
+            domain = item["wmt_category"]
+            langs = f"{item['src_lang']}-{item['tgt_lang']}"
+
+            model = item["translator_main_id"]
+            tgt = unicodedata.normalize("NFKC", item["pe_text"].strip())
+
+            scores = {
+                score: float(item[score]) if item[score] is not None else 0.0 for score in score_attrs if score in item
+            }
+            # compute score for MQM errors
+            for score in mqm_attrs:
+                if score in item:
+                    scores[score] = (
+                        mqm_score(get_errors_severities(ast.literal_eval(item[score])), weights=mqm_weights)
+                        if item[score] is not None
+                        else 0.0
+                    )
+
+            key = (langs, doc, seg)
+            if key not in grouped:
+                grouped[key] = {
+                    "src": src,
+                    "ref": ref,
+                    "doc": doc,
+                    "domain": domain,
+                    "langs": langs,
+                    "tgt": {},
+                    "scores": {},
+                }
+
+            grouped[key]["tgt"][model] = tgt
+            grouped[key]["scores"][model] = scores
+
+        # convert to list
+        data = collections.defaultdict(list)
+        for i, item in enumerate(grouped.values()):
+            # Calculate cost based on the average score segment_edit_time_filtered across all models (translators)
+            # or use the default formula if no scores are available
+            filtered_segment_edit_times = np.array(
+                [x["segment_edit_time_filtered"] for x in item["scores"].values() if "segment_edit_time_filtered" in x]
+            )
+            cost = (
+                np.average(filtered_segment_edit_times)
+                if filtered_segment_edit_times.size > 0
+                else (0.15 * len(item["src"].split()) + 33.7)
+            )
+            entry = {
+                "i": i,
+                "src": item["src"],
+                "ref": item["ref"],
+                "tgt": item["tgt"],
+                "scores": item["scores"],
+                "doc": item["doc"],
+                "domain": item["domain"],
+                "cost": cost,
+            }
+            data[("qe4pe", item["langs"])].append(entry)
+
+        if normalize:
+            for data_per_lang in data.values():
+                # Normalize cost
+                costs = np.array([x["cost"] for x in data_per_lang])
+                cost_norm = (costs - costs.mean()) / costs.std() + 1
+                cost_norm = (cost_norm - cost_norm.min()) / (1 - cost_norm.min())
+                for i, x in enumerate(data_per_lang):
+                    x["cost"] = float(cost_norm[i])
+
+                # Normalize scores to 0–100 if requested
+                for attr in score_attrs:
+                    all_scores = [
+                        score[attr] for item in data_per_lang for score in item["scores"].values() if attr in score
+                    ]
+                    if not all_scores:
+                        continue
+                    smin, smax = min(all_scores), max(all_scores)
+                    for item in data_per_lang:
+                        for model in item["scores"]:
+                            raw = item["scores"][model][attr]
+                            scaled = 100 * (raw - smin) / (smax - smin) if smax > smin else 0
+                            item["scores"][model][attr] = float(scaled)
+
+        return dict(data)  # Convert defaultdict to dict
+
+    return load_data_hf(
+        dataset,
+        loader_kwargs={"name": task, "split": "train"},
+        cache_fname=cache_fname,
+        converter=qe4pe_converter,
+        converter_kwargs={
+            "normalize": normalize,
+            "mqm_weights": mqm_weights,
+            "skip_has_issue": skip_has_issue,
+            "skip_has_added_critical_error": skip_has_added_critical_error,
+            "score_attrs": score_attrs,
+            "mqm_attrs": mqm_attrs,
+        },
     )
 
 
@@ -320,7 +565,7 @@ def load_data_wmt(  # noqa: C901
                 # only load data if they come from the same version
                 if isinstance(cache, dict) and "version" in cache.keys() and cache["version"] == importlib.metadata.version("subset2evaluate"):
                     return cache["data"]
-        
+
 
         lines_src = open(f"data/mt-metrics-eval-v2/{year}/sources/{langs}.txt", "r").readlines()
         lines_doc = open(f"data/mt-metrics-eval-v2/{year}/documents/{langs}.docs", "r").readlines()
@@ -404,7 +649,7 @@ def load_data_wmt(  # noqa: C901
         total_n_srcs = len(lines_src)
         if contain_canary_line:
             total_n_srcs += 1
-        
+
         for f in glob.glob(f"data/mt-metrics-eval-v2/{year}/metric-scores/{langs}/*.seg.score"):
             # among ref-based metrics, load only the scores for the selected human ref
             if not f.endswith(f"-{selected_human_ref}.seg.score") and not f.endswith("-src.seg.score"):
@@ -874,6 +1119,8 @@ def load_data(data: Union[List, str], **kwargs):
         return load_data_summeval(**kwargs)
     elif data == "biomqm":
         return load_data_biomqm(**kwargs)
+    elif data == "qe4pe":
+        return load_data_qe4pe(**kwargs)
     else:
         raise Exception("Could not parse data")
 
