@@ -336,6 +336,7 @@ def load_data_qe4pe(
     skip_has_added_critical_error: bool = False,
     score_attrs: List[str] = None,
     mqm_attrs: List[str] = None,
+    normalize_attrs: List[str] = None,
 ) -> Dict[str, List[Dict[str, Any]]]:
     """
     Load the QE4PE dataset for the specified task.
@@ -359,6 +360,7 @@ def load_data_qe4pe(
         skip_has_added_critical_error: bool = False,
         score_attrs: List[str] = None,
         mqm_attrs: List[str] = None,
+        normalize_attrs: List[str] = None,
     ) -> Dict[str, List[Dict[str, Any]]]:
         """
         Convert the Hugging Face dataset to the required format for subset2eval.
@@ -469,16 +471,8 @@ def load_data_qe4pe(
         # convert to list
         data = collections.defaultdict(list)
         for i, item in enumerate(grouped.values()):
-            # Calculate cost based on the average score segment_edit_time_filtered across all models (translators)
-            # or use the default formula if no scores are available
-            filtered_segment_edit_times = np.array(
-                [x["segment_edit_time_filtered"] for x in item["scores"].values() if "segment_edit_time_filtered" in x]
-            )
-            cost = (
-                np.average(filtered_segment_edit_times)
-                if filtered_segment_edit_times.size > 0
-                else (0.15 * len(item["src"].split()) + 33.7)
-            )
+            # just a very rough estimate
+            cost = 0.15 * len(item["src"].split()) + 33.7
             entry = {
                 "i": i,
                 "src": item["src"],
@@ -491,17 +485,19 @@ def load_data_qe4pe(
             }
             data[("qe4pe", item["langs"])].append(entry)
 
-        if normalize:
+        # always normalize costs
+        if data:
             for data_per_lang in data.values():
-                # Normalize cost
                 costs = np.array([x["cost"] for x in data_per_lang])
                 cost_norm = (costs - costs.mean()) / costs.std() + 1
                 cost_norm = (cost_norm - cost_norm.min()) / (1 - cost_norm.min())
                 for i, x in enumerate(data_per_lang):
                     x["cost"] = float(cost_norm[i])
 
+        if normalize:
+            for data_per_lang in data.values():
                 # Normalize scores to 0–100 if requested
-                for attr in score_attrs:
+                for attr in normalize_attrs or [*score_attrs, *mqm_attrs]:
                     all_scores = [
                         score[attr] for item in data_per_lang for score in item["scores"].values() if attr in score
                     ]
@@ -528,6 +524,7 @@ def load_data_qe4pe(
             "skip_has_added_critical_error": skip_has_added_critical_error,
             "score_attrs": score_attrs,
             "mqm_attrs": mqm_attrs,
+            "normalize_attrs": normalize_attrs,
         },
     )
 
