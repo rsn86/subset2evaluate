@@ -81,5 +81,5 @@ data_aggregated_costaware = subset2evaluate.select_subset.costaware(data_aggrega
 cost_aggregated_costaware = sum([line["cost"] for line in data_aggregated_costaware])
 print(f"Cost of the doc aggregated cost-aware selection: {cost_aggregated_costaware:.2f} #{len(data_aggregated_costaware)} documents")
 
-corr_aggregated_costaware = subset2evaluate.evaluate.eval_subset_correlation(data_aggregated_costaware, data_full, metric="pe_xcomet_qe")
+corr_aggregated_costaware = subset2evaluate.evaluate.eval_subset_correlation(data_aggregated_costaware, data_aggregated, metric="pe_xcomet_qe")
 print(f"Correlation of the doc aggregated cost-aware selection: {corr_aggregated_costaware:.2f}")
